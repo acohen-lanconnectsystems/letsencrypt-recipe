@@ -13,7 +13,7 @@ One box issues every cert, keeps the DNS API credentials in a DPAPI-bound vault,
 
 ## Layout
 
-```
+```text
 scripts/
   00-Test-EasyDNS-Sandbox.ps1   optional network-path test against the easyDNS sandbox
   01-Install-Prereqs.ps1        pwsh 7, modules, EasyDNSFix plugin install     (admin, elevated)
@@ -163,6 +163,7 @@ Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='ACME-Renewa
    ```powershell
    Get-ChildItem *.ps1 | Where-Object { [IO.File]::ReadAllBytes($_.FullName) | Where-Object { $_ -gt 127 } } | Select-Object Name
    ```
+
 6. **Never delete a superseded cert's private key.** Posh-ACME reuses one key across renewals, so the old and live certs share a key container. `-DeleteKey` on the old cert kills the live one with "Keyset does not exist", and the failure is **delayed** until the next `iisreset`/reboot. `05 -RemoveSuperseded` removes cert *entries* only. After any key-related repair: `iisreset`, then verify externally.
 
 ## easyDNS API - learned the hard way

@@ -40,7 +40,7 @@ Public-CA maximum certificate lifetimes are collapsing: the CA/Browser Forum cap
 ## Suggested order
 
 | Phase | Scope | Why this order |
-|---|---|---|
+| --- | --- | --- |
 | **0** | Prerequisites: DNS API per zone, LE account, reachability, vault | Nothing issues without DNS-01 working. **Gating.** |
 | **1** | Orchestrator build (Posh-ACME + DNS-01 + scheduler), staging-proven | The single issuer everything depends on. |
 | **2** | **Pilot: the simplest IIS host** (ideally the orchestrator itself) | Local deploy, no remoting to prove at the same time as the ACME path. |
@@ -58,6 +58,7 @@ Public-CA maximum certificate lifetimes are collapsing: the CA/Browser Forum cap
 ## Phase 0 - Prerequisites (no changes; gating)
 
 **0.1 - Identify the authoritative DNS provider for every zone in scope.** They can differ per zone.
+
 ```bash
 dig +short NS example.com
 dig +short NS example.net
@@ -72,7 +73,8 @@ dig +short NS example.net
 **0.4 - Confirm outbound 443 to Let's Encrypt is not intercepted.** `Set-PAServer` failing with *"was not valid JSON"* means a proxy/web filter is breaking the API; *"No such host is known"* means DNS. Allow `acme-v02.api.letsencrypt.org` and `acme-staging-v02.api.letsencrypt.org`.
 
 **0.5 - DNS-01 fallback (only if a zone's provider has no usable API):** delegate just the challenge record.
-```
+
+```text
 # In the zone that CANNOT be automated, add a static CNAME once:
 _acme-challenge.<host>.<zone>.  CNAME  <host>.<zone>.<automatable-zone>.
 # ACME then writes the TXT in the automatable zone; the static CNAME never changes.
@@ -98,22 +100,27 @@ Fully scripted. Run from `scripts\`, in order. Each step names the account and t
 **1.3 - `03-Test-StagingCert.ps1 -Hosts <one name per zone>`** - same account, pwsh 7. **This is the gate:** every zone must print `PASS` before any production issuance. Staging certs are untrusted by design; never deploy one.
 
 **1.4 - Production account** - same account, pwsh 7:
+
 ```powershell
 Set-PAServer LE_PROD
 New-PAAccount -AcceptTOS -Contact 'mailto:<your-contact-email>'
 ```
+
 Posh-ACME keeps both accounts; `Set-PAServer` toggles between them for future dry runs.
 
 **1.5 - Inventory** - copy `CertHosts.example.ps1` to `CertHosts.ps1` and describe every host (see the five patterns in the example). Then:
+
 ```powershell
 .\07-Renew-And-Deploy.ps1 -WhatIfIssue     # lists what would issue; issues nothing
 ```
 
 **1.6 - `04-Register-RenewalTask.ps1 -TaskUser '<DOMAIN\svc-acme>'`** - local admin, **elevated**, pwsh 7. Registers the daily `ACME-Renewal` task (RunLevel Highest) that runs `07-Renew-And-Deploy.ps1`. **`-TaskUser` must be the exact account that ran `02`.** Smoke test:
+
 ```powershell
 Start-ScheduledTask -TaskName 'ACME-Renewal'
 Get-Content C:\ProgramData\Posh-ACME-Renewal\renewal.log -Tail 30
 ```
+
 Expected before any production cert: a header line and `RESULT: OK` with nothing to renew.
 
 **Verify:** `Get-PACertificate <fqdn>` shows a cert with the STAGING issuer; every zone passed `03`.
@@ -130,18 +137,21 @@ See the table at the end of [`../README.md`](../README.md). When anything misbeh
 **Purpose:** the simplest case. If the orchestrator is itself an IIS host, its deploy is a local script call and nothing else has to be proven at the same time as the ACME path.
 
 **2.1 - Issue the production cert** (service account, pwsh 7, one at a time):
+
 ```powershell
 .\07-Renew-And-Deploy.ps1 -IssueOnly web01.example.com
 ```
+
 With a local-IIS entry in `CertHosts.ps1` (pattern 1 in the example) the deploy hook runs as part of issuance: `05` imports into `LocalMachine\My` with the chain and removes superseded cert **entries**, `06` rebinds the site to the new thumbprint and prints the previous thumbprint (the rollback handle).
 
 **2.2 - Prove the hook without waiting for a renewal:**
+
 ```powershell
 .\07-Renew-And-Deploy.ps1 -ForceDeploy web01.example.com
 ```
 
 > **Why the rebind is needed every renewal:** IIS binds by thumbprint, which is a hash of the whole certificate and changes at every renewal even though Posh-ACME reuses the key. The per-renewal IIS deploy is always the pair **05 import -> 06 rebind**.
-
+>
 > **NEVER delete a superseded cert's private key.** The superseded and the live certificate share one key container. Deleting the old cert **with** its key kills the live cert with "Keyset does not exist", and IIS keeps serving from memory until the next `iisreset` or reboot, so the failure surfaces days later. `05 -RemoveSuperseded` removes entries only. After any key-related repair: `iisreset`, then re-check externally.
 
 **Verify:** `Get-ChildItem IIS:\SslBindings` shows the new thumbprint; `openssl s_client -connect <host>:443 -servername <fqdn>` shows the Let's Encrypt issuer and new dates; the site loads without warnings.
@@ -154,17 +164,21 @@ With a local-IIS entry in `CertHosts.ps1` (pattern 1 in the example) the deploy 
 **Purpose:** same method over WinRM. Stage 1 is automated; stage 2 is a short manual step until proven, then automated.
 
 **3.1 - Store push (automated).** Add the host as pattern 2 in `CertHosts.ps1` (`PushTarget` + `PushSecrets`). As the service account, store a credential with local-admin rights on the target, confirm WinRM, and prove the push:
+
 ```powershell
 Set-Secret -Name Web02-Cred -Secret (Get-Credential)
 Test-WSMan web02.example.com
 .\07-Renew-And-Deploy.ps1 -ForceDeploy portal.example.com
 ```
+
 The cert and its private key now sit in the target's `LocalMachine\My`. Nothing is bound.
 
 **3.2 - Bind (manual the first time).** On the target, elevated:
+
 ```powershell
 .\06-Bind-IISCert.ps1 -Domain portal.example.com -SiteName '<site>' -HostHeader 'portal.example.com'   # SNI-bound site
 ```
+
 **Bind by thumbprint** if the store holds other certs for the same name; the push logs them.
 
 **3.3 - Promote.** Once the binding is proven, extend the entry's `Deploy` hook to also run `06` remotely (or move the whole deploy to a local scheduled script on the target) and drop the `DeployNote`.
@@ -183,6 +197,7 @@ The cert and its private key now sit in the target's `LocalMachine\My`. Nothing 
 **4.2 - Store push (automated).** Pattern 3 in `CertHosts.ps1`. Prove with `-ForceDeploy mail.example.com`. Mail flow is untouched: nothing is enabled.
 
 **4.3 - Enable (manual, in the window).** On the Exchange box:
+
 ```powershell
 Enable-ExchangeCertificate -Thumbprint <tp> -Services IIS,SMTP   # add IMAP,POP only if in use
 Get-ExchangeCertificate -Thumbprint <tp> | Format-List Services,NotAfter,Subject
@@ -200,6 +215,7 @@ Get-ExchangeCertificate -Thumbprint <tp> | Format-List Services,NotAfter,Subject
 **5.1 - Issue** (pattern 4 in `CertHosts.ps1` until the hook exists): `.\07-Renew-And-Deploy.ps1 -IssueOnly vpn1.example.net`. Files land under `$env:LOCALAPPDATA\Posh-ACME\<server>\<account>\<fqdn>\` (`Get-PACertificate <fqdn> | fl *File*`).
 
 **5.2 - Push via the appliance API** (representative FortiOS calls; use an API admin scoped to certificate import):
+
 ```powershell
 $fg = 'https://<appliance>:<admin-port>'; $H = @{ Authorization = "Bearer <api-key>" }
 # Import under a date-stamped name; do NOT overwrite the in-use one yet
@@ -212,6 +228,7 @@ Invoke-RestMethod -Method PUT -Uri "$fg/api/v2/cmdb/system/global" -Headers $H `
 Invoke-RestMethod -Method PUT -Uri "$fg/api/v2/cmdb/vpn.ssl/settings" -Headers $H `
   -Body (@{ servercert='LE-vpn1-<yyyymm>' } | ConvertTo-Json)
 ```
+
 Wrap those calls in the entry's `Deploy` scriptblock once proven; store the API key in the vault, never in the script.
 
 **Verify:** `openssl s_client -connect <appliance>:<port> -servername vpn1.example.net` shows the LE issuer; on an HA pair confirm the standby is in sync; a VPN client still connects.
@@ -236,6 +253,7 @@ export EASYDNS_Token='<token>'; export EASYDNS_Key='<key>'
   --fullchain-file /etc/<service>/certs/site.crt \
   --reloadcmd      "sudo systemctl reload <service>"
 ```
+
 This host shares the DNS account's daily API budget with the orchestrator.
 
 **Verify:** the service reports healthy; `openssl s_client` shows the LE issuer; `~/.acme.sh/acme.sh --list` shows the cron-driven renewal.
@@ -272,7 +290,7 @@ The daily runner is `07-Renew-And-Deploy.ps1`; what it does, its inventory modes
 ## Effort (one-time setup)
 
 | Phase | Work | Effort |
-|---|---|---|
+| --- | --- | --- |
 | 0 | Prereqs | 0.5 d |
 | 1 | Orchestrator (scripted) | 1-2 h on a repeat build; 1 d first time |
 | 2 | IIS pilot | 0.25 d |
@@ -290,7 +308,7 @@ The daily runner is `07-Renew-And-Deploy.ps1`; what it does, its inventory modes
 ## Risk and rollback summary
 
 | Risk | Mitigation | Rollback |
-|---|---|---|
+| --- | --- | --- |
 | A zone's DNS provider has no usable API | CNAME-delegate `_acme-challenge.<host>` to an automatable zone (one-time) | n/a (discovery) |
 | New cert breaks admin/VPN access on an appliance | Import alongside, switch, verify in a held session before removing the old | Re-point bindings to the prior cert |
 | Exchange swap disrupts mail flow | Windowed change; test send/receive and OWA before closing | `Enable-ExchangeCertificate` previous thumbprint |
