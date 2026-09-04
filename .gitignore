@@ -1,0 +1,25 @@
+# Site-specific inventory (copy CertHosts.example.ps1 -> CertHosts.ps1)
+scripts/CertHosts.ps1
+
+# Never commit certificates, keys, or secrets
+*.pfx
+*.p12
+*.key
+*.pem
+*.cer
+*.crt
+
+# Runtime output
+*.log
+last-run.json
+host-health.json
+acme-diagnostics-*.txt
+
+# Editor / OS noise
+*.bak*
+*.orig
+*.swp
+Thumbs.db
+.DS_Store
+.vs/
+.vscode/
